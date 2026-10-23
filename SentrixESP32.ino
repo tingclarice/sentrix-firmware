@@ -20,6 +20,7 @@
 #include <BLESecurity.h>
 #include <Preferences.h>
 #include <atomic>
+#include <Ticker.h>
 #include <mbedtls/ecdh.h>
 #include <mbedtls/md.h>
 #include <mbedtls/gcm.h>
@@ -46,6 +47,37 @@ constexpr uint8_t CURRENT_PIN = 34;
 constexpr uint8_t IR_PIN = 35;
 constexpr uint8_t RED_LED_PIN = 4;
 constexpr uint8_t GREEN_LED_PIN = 2;
+constexpr bool RGB_LED_ENABLED = true;
+constexpr bool RGB_COMMON_ANODE = false; // false: common to GND; true: common to 3.3V.
+constexpr uint8_t RGB_RED_PIN = 25;
+constexpr uint8_t RGB_GREEN_PIN = 26;
+constexpr uint8_t RGB_BLUE_PIN = 27;
+
+// Bits 0..2 are R/G/B; bit 3 blinks slowly, bit 4 blinks quickly.
+constexpr uint8_t rgbState(bool fault, bool busy, bool bluetooth, bool configured,
+                           bool wifi, bool broker) {
+  return fault ? 17 : busy ? 11 : bluetooth ? 4 : !configured ? 12
+       : !wifi ? 9 : broker ? 2 : 3;
+}
+static_assert(rgbState(true, true, true, true, true, true) == 17, "Fault overrides setup");
+static_assert(rgbState(false, true, true, true, true, true) == 11, "Setup blinks yellow");
+static_assert(rgbState(false, false, true, true, true, true) == 4, "BLE is blue");
+static_assert(rgbState(false, false, false, false, false, false) == 12, "Unconfigured blinks blue");
+static_assert(rgbState(false, false, false, true, false, false) == 9, "Wi-Fi loss blinks red");
+static_assert(rgbState(false, false, false, true, true, false) == 3, "No broker is yellow");
+static_assert(rgbState(false, false, false, true, true, true) == 2, "Connected is green");
+std::atomic<uint8_t> rgbPattern{12};
+std::atomic<bool> bluetoothConnected{false};
+Ticker rgbTicker;
+
+void renderRgb() {
+  const uint8_t pattern = rgbPattern.load();
+  const bool lit = pattern & 16 ? (millis() / 150) % 2 == 0
+                 : pattern & 8 ? (millis() / 500) % 2 == 0 : true;
+  digitalWrite(RGB_RED_PIN, ((pattern & 1) && lit) != RGB_COMMON_ANODE);
+  digitalWrite(RGB_GREEN_PIN, ((pattern & 2) && lit) != RGB_COMMON_ANODE);
+  digitalWrite(RGB_BLUE_PIN, ((pattern & 4) && lit) != RGB_COMMON_ANODE);
+}
 
 // Assumes SCT-013-000: 100 A primary / 50 mA secondary (2000:1).
 // These values DO NOT apply to SCT-013 variants with a built-in burden.
@@ -326,8 +358,9 @@ class ProvisionCallbacks : public BLECharacteristicCallbacks {
 };
 
 class SentrixServerCallbacks : public BLEServerCallbacks {
-  void onConnect(BLEServer *) override { beginSession(); }
+  void onConnect(BLEServer *) override { bluetoothConnected.store(true); beginSession(); }
   void onDisconnect(BLEServer *) override {
+    bluetoothConnected.store(false);
     bleInput = "";
     sessionReady = sessionAuthenticated = false;
     mbedtls_platform_zeroize(sessionKey, sizeof(sessionKey));
@@ -384,6 +417,7 @@ void loadProvisioning() {
 
 void serviceWifiScan() {
   if (!wifiScanPending.exchange(false)) return;
+  updateLeds();
   // Run in the main task so BLE callbacks remain responsive during the scan.
   const bool autoReconnect = WiFi.getAutoReconnect();
   WiFi.setAutoReconnect(false);
@@ -422,6 +456,7 @@ void serviceWifiScan() {
 void serviceProvisioning() {
   ProvisionRequest request{};
   if (xQueueReceive(provisioningQueue, &request, 0) != pdTRUE) return;
+  updateLeds();
   if (mqtt.connected()) mqtt.disconnect();
   WiFi.disconnect();
   WiFi.begin(request.ssid, request.password);
@@ -633,6 +668,11 @@ void reportMeasurement(const Measurement &value) {
 }
 
 void updateLeds() {
+  if (RGB_LED_ENABLED) {
+    rgbPattern.store(rgbState(sensorFault || highCurrent, provisioningBusy.load(),
+        bluetoothConnected.load(), wifiSsid.length() > 0, WiFi.status() == WL_CONNECTED,
+        MQTT_HOST[0] && mqtt.connected()));
+  }
   // Common cathode: HIGH turns on each LED.
   const bool networkConfigured = wifiSsid.length() || MQTT_HOST[0];
   const bool networkOK = (!wifiSsid.length() || WiFi.status() == WL_CONNECTED) &&
@@ -645,6 +685,14 @@ void updateLeds() {
 
 void setup() {
   Serial.begin(115200);
+  if (RGB_LED_ENABLED) {
+    pinMode(RGB_RED_PIN, OUTPUT);
+    pinMode(RGB_GREEN_PIN, OUTPUT);
+    pinMode(RGB_BLUE_PIN, OUTPUT);
+    renderRgb();
+    // Timer-driven blinking continues while the main task scans or connects Wi-Fi.
+    rgbTicker.attach_ms(50, renderRgb);
+  }
   pinMode(RED_LED_PIN, OUTPUT);
   pinMode(GREEN_LED_PIN, OUTPUT);
   pinMode(CURRENT_PIN, INPUT);
