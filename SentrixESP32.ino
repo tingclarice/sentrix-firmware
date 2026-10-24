@@ -1,10 +1,11 @@
 /* Sentrix sensor node: classic ESP32 DevKit V1 / ESP32-WROOM.
- * Tested: ESP32 core 3.3.12; PubSubClient 2.8, IRremoteESP8266 2.9.0, ArduinoJson 7.4.3.
+ * Build dependencies are pinned in platformio.ini; see README.md for setup.
  * Single-file firmware: all settings and logic are in this sketch.
  * Reads the physical CT circuit on GPIO34. See README.md for wiring.
  */
 #include <Arduino.h>
 #include <WiFi.h>
+#include <WiFiClientSecure.h>
 #include <PubSubClient.h>
 #include <ArduinoJson.h>
 #include <IRremoteESP8266.h>
@@ -27,26 +28,69 @@
 #include <mbedtls/platform_util.h>
 
 // ===== USER SETTINGS: edit here, then upload =====
-// Change this per device before deployment; enter it only in the website PIN form.
-constexpr uint32_t HARDWARE_PIN = 715204;
-static_assert(HARDWARE_PIN <= 999999, "HARDWARE_PIN must fit six digits");
+// ===== NETWORK & BROKER CONFIGURATION =====
+constexpr char WIFI_SSID[] = "";
+constexpr char WIFI_PASSWORD[] = "";
+// Empty host disables MQTT until configured. Use the same broker as sentrix-api.
+constexpr char MQTT_BROKER_HOST[] = "";
+constexpr uint16_t MQTT_BROKER_PORT = 8883;
+constexpr char MQTT_CLIENT_ID[] = "sentrix-root-node"; // Station MAC is appended.
+constexpr char MQTT_USERNAME[] = "";
+constexpr char MQTT_PASSWORD[] = "";
+
+// ===== HARDWARE IDENTITY =====
+// Must match the factory-seeded devices.pin_code; also authenticates BLE setup.
+constexpr uint32_t DEVICE_PIN = 715204;
+constexpr char MESH_ID[] = ""; // groups.mesh_id returned by Go, not groups.id (UUID).
+constexpr char FIRMWARE_VERSION[] = "sentrix-arduino-3.0.0";
+static_assert(DEVICE_PIN <= 999999, "DEVICE_PIN must fit six digits");
+static_assert(MQTT_BROKER_PORT == 8883, "MQTT must use TLS port 8883");
+
+// ISRG Root X1: https://letsencrypt.org/certs/isrgrootx1.pem
+// Replace with your broker's issuing root CA if its chain uses a different root.
+constexpr char MQTT_ROOT_CA[] = R"PEM(-----BEGIN CERTIFICATE-----
+MIIFazCCA1OgAwIBAgIRAIIQz7DSQONZRGPgu2OCiwAwDQYJKoZIhvcNAQELBQAw
+TzELMAkGA1UEBhMCVVMxKTAnBgNVBAoTIEludGVybmV0IFNlY3VyaXR5IFJlc2Vh
+cmNoIEdyb3VwMRUwEwYDVQQDEwxJU1JHIFJvb3QgWDEwHhcNMTUwNjA0MTEwNDM4
+WhcNMzUwNjA0MTEwNDM4WjBPMQswCQYDVQQGEwJVUzEpMCcGA1UEChMgSW50ZXJu
+ZXQgU2VjdXJpdHkgUmVzZWFyY2ggR3JvdXAxFTATBgNVBAMTDElTUkcgUm9vdCBY
+MTCCAiIwDQYJKoZIhvcNAQEBBQADggIPADCCAgoCggIBAK3oJHP0FDfzm54rVygc
+h77ct984kIxuPOZXoHj3dcKi/vVqbvYATyjb3miGbESTtrFj/RQSa78f0uoxmyF+
+0TM8ukj13Xnfs7j/EvEhmkvBioZxaUpmZmyPfjxwv60pIgbz5MDmgK7iS4+3mX6U
+A5/TR5d8mUgjU+g4rk8Kb4Mu0UlXjIB0ttov0DiNewNwIRt18jA8+o+u3dpjq+sW
+T8KOEUt+zwvo/7V3LvSye0rgTBIlDHCNAymg4VMk7BPZ7hm/ELNKjD+Jo2FR3qyH
+B5T0Y3HsLuJvW5iB4YlcNHlsdu87kGJ55tukmi8mxdAQ4Q7e2RCOFvu396j3x+UC
+B5iPNgiV5+I3lg02dZ77DnKxHZu8A/lJBdiB3QW0KtZB6awBdpUKD9jf1b0SHzUv
+KBds0pjBqAlkd25HN7rOrFleaJ1/ctaJxQZBKT5ZPt0m9STJEadao0xAH0ahmbWn
+OlFuhjuefXKnEgV4We0+UXgVCwOPjdAvBbI+e0ocS3MFEvzG6uBQE3xDk3SzynTn
+jh8BCNAw1FtxNrQHusEwMFxIt4I7mKZ9YIqioymCzLq9gwQbooMDQaHWBfEbwrbw
+qHyGO0aoSCqI3Haadr8faqU9GY/rOPNk3sgrDQoo//fb4hVC1CLQJ13hef4Y53CI
+rU7m2Ys6xt0nUW7/vGT1M0NPAgMBAAGjQjBAMA4GA1UdDwEB/wQEAwIBBjAPBgNV
+HRMBAf8EBTADAQH/MB0GA1UdDgQWBBR5tFnme7bl5AFzgAiIyBpY9umbbjANBgkq
+hkiG9w0BAQsFAAOCAgEAVR9YqbyyqFDQDLHYGmkgJykIrGF1XIpu+ILlaS/V9lZL
+ubhzEFnTIZd+50xx+7LSYK05qAvqFyFWhfFQDlnrzuBZ6brJFe+GnY+EgPbk6ZGQ
+3BebYhtF8GaV0nxvwuo77x/Py9auJ/GpsMiu/X1+mvoiBOv/2X/qkSsisRcOj/KK
+NFtY2PwByVS5uCbMiogziUwthDyC3+6WVwW6LLv3xLfHTjuCvjHIInNzktHCgKQ5
+ORAzI4JMPJ+GslWYHb4phowim57iaztXOoJwTdwJx4nLCgdNbOhdjsnvzqvHu7Ur
+TkXWStAmzOVyyghqpZXjFaH3pO3JLF+l+/+sKAIuvtd7u+Nxe5AW0wdeRlN8NwdC
+jNPElpzVmbUq4JUagEiuTDkHzsxHpFKVK7q4+63SM1N95R1NbdWhscdCb+ZAJzVc
+oyi3B43njTOQ5yOf+1CceWxG1bQVs5ZufpsMljq4Ui0/1lvh+wjChP4kqKOJ2qxq
+4RgqsahDYVvTH9w7jXbyLeiNdd8XM2w9U/t7y0Ff/9yi0GE44Za4rF2LN9d11TPA
+mRGunUHBcnWEvgJBQl9nJEiU0Zsnvgc/ubhPgXRR4Xq37Z0j4r7g1SgEEzwxA57d
+emyPxgcYxn/eR44/KJ4EBs+lVDR3veyJm+kXQ99b21/+jh5Xos1AnX5iItreGCc=
+-----END CERTIFICATE-----
+)PEM";
+
 constexpr char SERVICE_UUID[] = "12345678-1234-5678-1234-56789abcdef0";
 constexpr char IDENTITY_UUID[] = "12345678-1234-5678-1234-56789abcdef1";
 constexpr char CONFIG_UUID[] = "12345678-1234-5678-1234-56789abcdef2";
 constexpr char STATUS_UUID[] = "12345678-1234-5678-1234-56789abcdef3";
 constexpr char SESSION_UUID[] = "12345678-1234-5678-1234-56789abcdef4";
-constexpr char WIFI_SSID[] = "";
-constexpr char WIFI_PASSWORD[] = "";
-// Local PicoMQTT or Mosquitto broker IP. Empty = Serial-only operation.
-constexpr char MQTT_HOST[] = "";
-constexpr uint16_t MQTT_PORT = 1883;
-constexpr char MQTT_USER[] = "";
-constexpr char MQTT_PASSWORD[] = "";
-
 constexpr uint8_t CURRENT_PIN = 34;
 constexpr uint8_t IR_PIN = 35;
 constexpr uint8_t RED_LED_PIN = 4;
 constexpr uint8_t GREEN_LED_PIN = 2;
+constexpr bool STATUS_LED_ACTIVE_HIGH = true; // Set false for an active-low board LED.
 constexpr bool RGB_LED_ENABLED = true;
 constexpr bool RGB_COMMON_ANODE = false; // false: common to GND; true: common to 3.3V.
 constexpr uint8_t RGB_RED_PIN = 25;
@@ -70,6 +114,39 @@ std::atomic<uint8_t> rgbPattern{12};
 std::atomic<bool> bluetoothConnected{false};
 Ticker rgbTicker;
 
+// GPIO2 states: 0=fatal, 1=unconfigured, 2=setup, 3=Wi-Fi, 4=NTP,
+// 5=MQTT, 6=connected, 7=measurement warning. Only this timer writes GPIO2.
+std::atomic<uint8_t> statusPattern{1};
+constexpr bool statusLedOn(uint8_t state, uint32_t elapsed) {
+  return state == 0 ? true
+       : state == 1 ? elapsed % 1000 < 500
+       : state == 2 ? elapsed % 300 < 150
+       : state == 6 ? elapsed % 3000 < 100
+       : state == 7 ? elapsed % 100 < 50
+       : elapsed % 3000 < (state - 1) * 300U && elapsed % 300 < 100;
+}
+static_assert(statusLedOn(3, 300) && !statusLedOn(3, 600), "Wi-Fi: two flashes");
+static_assert(statusLedOn(4, 600) && !statusLedOn(4, 900), "NTP: three flashes");
+static_assert(statusLedOn(5, 900) && !statusLedOn(5, 1200), "MQTT: four flashes");
+static_assert(statusLedOn(6, 0) && !statusLedOn(6, 100), "Connected heartbeat");
+
+void renderStatus() {
+  static uint8_t previous = 255;
+  static uint32_t started = 0;
+  const uint32_t now = millis();
+  const uint8_t state = statusPattern.load();
+  if (state != previous) { previous = state; started = now; }
+  digitalWrite(GREEN_LED_PIN, statusLedOn(state, now - started) == STATUS_LED_ACTIVE_HIGH);
+  if (RGB_LED_ENABLED) renderRgb();
+}
+
+void fatalError(const char *reason) {
+  Serial.println(reason);
+  statusPattern.store(0);
+  rgbPattern.store(17);
+  while (true) delay(1000);
+}
+
 void renderRgb() {
   const uint8_t pattern = rgbPattern.load();
   const bool lit = pattern & 16 ? (millis() / 150) % 2 == 0
@@ -90,6 +167,8 @@ constexpr double ACTIVE_CURRENT_A = 0.25;
 // Demonstration warning threshold, not an electrical protection device.
 constexpr double HIGH_CURRENT_A = 10.0;
 constexpr uint32_t REPORT_INTERVAL_MS = 1000;
+constexpr uint32_t BATCH_INTERVAL_MS = 60000;
+constexpr uint32_t MAX_READING_AGE_MS = 2500;
 constexpr uint32_t SAMPLE_INTERVAL_US = 500; // nominal 2 kHz
 constexpr uint32_t SAMPLE_WINDOW_US = 200000; // 10 x 50 Hz or 12 x 60 Hz
 
@@ -132,14 +211,16 @@ struct RmsAccumulator {
 Measurement readCurrent();
 void reportMeasurement(const Measurement &value);
 
-WiFiClient transport;
+WiFiClientSecure transport;
 PubSubClient mqtt(transport);
-String deviceId, telemetryTopic, statusTopic, irTopic;
-char bootId[9];
-uint32_t sequence = 0, nextReport = 0, nextWiFi = 0, nextMqtt = 0;
+String deviceId, handshakeTopic;
+uint32_t nextReport = 0, nextWiFi = 0, nextMqtt = 0, lastBatch = 0;
+uint32_t measuredAt = 0;
+Measurement latestMeasurement;
 uint32_t lastIr = 0;
 bool seenIr = false, active = false, sensorFault = false, highCurrent = false;
 bool wifiWasConnected = false;
+bool handshakePublished = false;
 // Keep the last decoded setpoint; NAN means no usable temperature received yet.
 float remoteTemperatureC = NAN;
 IRrecv irReceiver(IR_PIN, 1024, 50, true);
@@ -155,14 +236,14 @@ static_assert(!(setpointCelsius(0.0f, true) == setpointCelsius(0.0f, true)),
               "Reject missing/sentinel temperature");
 static_assert(!(setpointCelsius(100.0f, true) == setpointCelsius(100.0f, true)),
               "Reject invalid temperature");
-String wifiSsid = WIFI_SSID, wifiPassword = WIFI_PASSWORD, groupId;
+String wifiSsid = WIFI_SSID, wifiPassword = WIFI_PASSWORD, meshId = MESH_ID;
 BLECharacteristic *bleStatus = nullptr;
 QueueHandle_t provisioningQueue;
 std::atomic<bool> provisioningBusy{false};
 struct ProvisionRequest {
   char ssid[33];
   char password[65];
-  char group[65];
+  char mesh[65];
 };
 String bleInput;
 
@@ -200,6 +281,26 @@ bool readHex(const String &value, uint8_t *output, size_t length) {
 bool sessionProof(const char *label, uint8_t *output) {
   return mbedtls_md_hmac(mbedtls_md_info_from_type(MBEDTLS_MD_SHA256),
       sessionKey, sizeof(sessionKey), (const uint8_t *)label, strlen(label), output) == 0;
+}
+
+bool validMeshId(const String &value) {
+  if (!value.length() || value.length() > 64) return false;
+  for (size_t i = 0; i < value.length(); ++i) {
+    const char c = value[i];
+    if (!((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
+          (c >= '0' && c <= '9') || c == '_' || c == '-')) return false;
+  }
+  return true;
+}
+
+String provisionedMesh(const JsonDocument &doc) {
+  // Keep older BLE clients/NVS records readable; group_id must contain mesh_id.
+  if (!doc["mesh_id"].isNull() && !doc["mesh_id"].is<String>()) return "";
+  const String value = doc["mesh_id"].is<String>() ? doc["mesh_id"].as<String>()
+                                                   : doc["group_id"].as<String>();
+  if (!doc["group_id"].isNull() &&
+      (!doc["group_id"].is<String>() || doc["group_id"].as<String>() != value)) return "";
+  return validMeshId(value) ? value : String();
 }
 
 void beginSession() {
@@ -272,7 +373,7 @@ class ProvisionCallbacks : public BLECharacteristicCallbacks {
       mbedtls_mpi_free(&shared);
       memcpy(keyMaterial + 32, sessionChallenge, 16);
       char pin[7];
-      snprintf(pin, sizeof(pin), "%06lu", (unsigned long)HARDWARE_PIN);
+      snprintf(pin, sizeof(pin), "%06lu", (unsigned long)DEVICE_PIN);
       memcpy(keyMaterial + 48, pin, 6);
       valid = valid && mbedtls_md(mbedtls_md_info_from_type(MBEDTLS_MD_SHA256),
                                   keyMaterial, sizeof(keyMaterial), sessionKey) == 0 &&
@@ -331,23 +432,22 @@ class ProvisionCallbacks : public BLECharacteristicCallbacks {
     JsonDocument doc;
     const auto configError = deserializeJson(doc, static_cast<const uint8_t *>(plaintext), length - 16);
     mbedtls_platform_zeroize(plaintext, sizeof(plaintext));
-    if (configError || !doc["ssid"].is<String>() || !doc["password"].is<String>() ||
-        !doc["group_id"].is<String>()) {
+    if (configError || !doc["ssid"].is<String>() || !doc["password"].is<String>()) {
       bleStatus->setValue("invalid_config");
       return;
     }
-    const String ssid = doc["ssid"], password = doc["password"], group = doc["group_id"];
+    const String ssid = doc["ssid"], password = doc["password"], mesh = provisionedMesh(doc);
     if (!ssid.length() || ssid.length() > 32 || password.length() > 63 ||
-        (password.length() && password.length() < 8) || !group.length() || group.length() > 64 ||
+        (password.length() && password.length() < 8) || !mesh.length() ||
         strlen(ssid.c_str()) != ssid.length() || strlen(password.c_str()) != password.length() ||
-        strlen(group.c_str()) != group.length()) {
+        strlen(mesh.c_str()) != mesh.length()) {
       bleStatus->setValue("invalid_config");
       return;
     }
     ProvisionRequest request{};
     ssid.toCharArray(request.ssid, sizeof(request.ssid));
     password.toCharArray(request.password, sizeof(request.password));
-    group.toCharArray(request.group, sizeof(request.group));
+    mesh.toCharArray(request.mesh, sizeof(request.mesh));
     provisioningBusy.store(true);
     bleStatus->setValue("connecting");
     if (xQueueSend(provisioningQueue, &request, 0) != pdTRUE) {
@@ -370,9 +470,7 @@ class SentrixServerCallbacks : public BLEServerCallbacks {
 
 void startBluetooth() {
   provisioningQueue = xQueueCreate(1, sizeof(ProvisionRequest));
-  if (!provisioningQueue) {
-    while (true) delay(1000);
-  }
+  if (!provisioningQueue) fatalError("Provisioning queue allocation failed");
   String name = "Sentrix-" + deviceId.substring(12);
   name.replace(":", "");
   BLEDevice::init(name);
@@ -409,10 +507,12 @@ void loadProvisioning() {
   prefs.end();
   JsonDocument doc;
   if (deserializeJson(doc, saved) || !doc["ssid"].is<String>() ||
-      !doc["password"].is<String>() || !doc["group_id"].is<String>()) return;
+      !doc["password"].is<String>()) return;
+  const String mesh = provisionedMesh(doc);
+  if (!mesh.length()) return;
   wifiSsid = doc["ssid"].as<String>();
   wifiPassword = doc["password"].as<String>();
-  groupId = doc["group_id"].as<String>();
+  meshId = mesh;
 }
 
 void serviceWifiScan() {
@@ -458,6 +558,7 @@ void serviceProvisioning() {
   if (xQueueReceive(provisioningQueue, &request, 0) != pdTRUE) return;
   updateLeds();
   if (mqtt.connected()) mqtt.disconnect();
+  handshakePublished = false;
   WiFi.disconnect();
   WiFi.begin(request.ssid, request.password);
   const uint32_t started = millis();
@@ -470,7 +571,7 @@ void serviceProvisioning() {
     JsonDocument doc;
     doc["ssid"] = request.ssid;
     doc["password"] = request.password;
-    doc["group_id"] = request.group;
+    doc["mesh_id"] = request.mesh;
     String saved;
     serializeJson(doc, saved);
     Preferences prefs;
@@ -482,7 +583,7 @@ void serviceProvisioning() {
     if (stored) {
       wifiSsid = request.ssid;
       wifiPassword = request.password;
-      groupId = request.group;
+      meshId = request.mesh;
       result = "connected";
     } else result = "storage_failed";
   }
@@ -513,6 +614,7 @@ void serviceNetwork() {
   if (!wifiSsid.length()) return;
   if (WiFi.status() != WL_CONNECTED) {
     wifiWasConnected = false;
+    handshakePublished = false;
     if (mqtt.connected()) mqtt.disconnect();
     if (due(now, nextWiFi)) {
       nextWiFi = now + 15000;
@@ -524,26 +626,71 @@ void serviceNetwork() {
     wifiWasConnected = true;
     configTime(0, 0, "pool.ntp.org", "time.nist.gov");
   }
-  if (!MQTT_HOST[0]) return;
+  // A real clock is required for both TLS certificate dates and Go time series.
+  if (time(nullptr) <= 1700000000 || !MQTT_BROKER_HOST[0] || !validMeshId(meshId)) return;
   if (!mqtt.connected() && due(now, nextMqtt)) {
     nextMqtt = now + 5000;
-    String clientId = "sentrix-" + deviceId;
-    // Retained LWT allows the gateway to notice an unexpected disconnect.
+    handshakePublished = false;
+    updateLeds(); // Timer keeps the MQTT pattern running throughout TLS negotiation.
+    String clientId = String(MQTT_CLIENT_ID) + "-" + deviceId;
     const bool connected = mqtt.connect(clientId.c_str(),
-        MQTT_USER[0] ? MQTT_USER : nullptr,
-        MQTT_USER[0] ? MQTT_PASSWORD : nullptr,
-        statusTopic.c_str(), 1, true, "offline");
-    if (connected) {
-      mqtt.publish(statusTopic.c_str(), "online", true);
-      JsonDocument hello;
-      hello["device_id"] = deviceId;
-      hello["boot_id"] = bootId;
-      hello["group_id"] = groupId;
-      hello["firmware"] = "sentrix-arduino-2.3.0";
-      publishJson("sentrix/handshake", hello);
+        MQTT_USERNAME[0] ? MQTT_USERNAME : nullptr,
+        MQTT_USERNAME[0] ? MQTT_PASSWORD : nullptr);
+    if (!connected) {
+      Serial.printf("MQTT connect failed: %d\n", mqtt.state());
+      return;
     }
   }
+  if (mqtt.connected() && !handshakePublished) {
+    JsonDocument hello;
+    char pin[7];
+    snprintf(pin, sizeof(pin), "%06lu", (unsigned long)DEVICE_PIN);
+    hello["mac_address"] = deviceId;
+    hello["device_pin"] = pin;
+    hello["mesh_id"] = meshId;
+    hello["role"] = "root";
+    hello["firmware_version"] = FIRMWARE_VERSION;
+    hello["local_ip"] = WiFi.localIP().toString();
+    hello["wifi_rssi"] = WiFi.RSSI();
+    hello["timestamp"] = static_cast<int64_t>(time(nullptr));
+    handshakePublished = publishJson(handshakeTopic.c_str(), hello);
+    if (!handshakePublished) {
+      Serial.println("Handshake publish failed; reconnecting");
+      mqtt.disconnect();
+      nextMqtt = millis() + 5000;
+    } else Serial.println("Handshake sent to broker; API acceptance is not acknowledged");
+  }
   mqtt.loop();
+}
+
+void serviceBatch() {
+  const uint32_t now = millis();
+  if (now - lastBatch < BATCH_INTERVAL_MS || !mqtt.connected() ||
+      !handshakePublished || !validMeshId(meshId) || time(nullptr) <= 1700000000) return;
+  lastBatch = now;
+  if (!latestMeasurement.valid || !isfinite(latestMeasurement.current) ||
+      latestMeasurement.current < 0 || now - measuredAt > MAX_READING_AGE_MS) {
+    Serial.println("Telemetry skipped: no fresh valid current measurement");
+    return;
+  }
+  JsonDocument batch;
+  batch["mesh_id"] = meshId;
+  batch["timestamp"] = static_cast<int64_t>(time(nullptr));
+  batch["root_mac"] = deviceId;
+  JsonObject reading = batch["readings"].to<JsonArray>().add<JsonObject>();
+  reading["mac"] = deviceId; // Go expects mac here, not mac_address.
+  reading["node_type"] = "root";
+  reading["rms_current"] = latestMeasurement.current;
+  // IR gives a target setpoint, not a measured ambient/coil temperature.
+  if (isfinite(remoteTemperatureC)) reading["target_temperature"] = remoteTemperatureC;
+  batch["offline_nodes"].to<JsonArray>(); // Standalone root has no children.
+  const String topic = "sentrix/dt/" + meshId + "/batch";
+  if (!publishJson(topic.c_str(), batch)) {
+    Serial.println("Telemetry publish failed; reconnecting");
+    handshakePublished = false;
+    mqtt.disconnect();
+    nextMqtt = now + 5000;
+  }
 }
 
 Measurement readCurrent() {
@@ -599,102 +746,62 @@ void serviceIR() {
         temperatureDecoded = true;
       }
     }
-    JsonDocument event;
-    event["device_id"] = deviceId;
-    event["boot_id"] = bootId;
-    event["uptime_ms"] = lastIr;
-    event["protocol"] = typeToString(irResults.decode_type);
-    if (!hasACState(irResults.decode_type)) {
-      event["address"] = irResults.address;
-      event["command"] = irResults.command;
-    } else {
-      event["address"] = nullptr;
-      event["command"] = nullptr;
-    }
-    event["bits"] = irResults.bits;
-    event["overflow"] = false;
-    event["temperature_decoded"] = temperatureDecoded;
-    if (temperatureDecoded) event["temperature_setpoint_c"] = remoteTemperatureC;
-    else event["temperature_setpoint_c"] = nullptr;
-    // Keep decoded AC details available for unsupported-model diagnosis via MQTT.
-    event["ac_state"] = description;
-    if (mqtt.connected()) publishJson(irTopic.c_str(), event);
+    // Go has no IR event subscriber. Preserve diagnosis locally and send the
+    // latest decoded setpoint as target_temperature in the next minute's batch.
+    Serial.printf("IR protocol:%s temperature_decoded:%d state:%s\n",
+                  typeToString(irResults.decode_type).c_str(), temperatureDecoded,
+                  description.c_str());
   }
   // Saved-buffer decoding already resumes capture; do not discard the next frame.
 }
 
 void reportMeasurement(const Measurement &value) {
   sensorFault = !value.valid;
+  latestMeasurement = value;
+  measuredAt = millis();
   if (value.valid) {
     if (value.current >= ACTIVE_CURRENT_A) active = true;
     else if (value.current <= STANDBY_CURRENT_A) active = false;
   }
   highCurrent = value.valid && value.current >= HIGH_CURRENT_A;
-  JsonDocument doc;
-  doc["schema_version"] = 2;
-  doc["group_id"] = groupId;
-  doc["device_id"] = deviceId;
-  doc["boot_id"] = bootId;
-  doc["sequence"] = ++sequence;
-  doc["uptime_ms"] = millis();
-  const time_t now = time(nullptr);
-  if (now > 1700000000) doc["timestamp_unix"] = static_cast<int64_t>(now);
-  else doc["timestamp_unix"] = nullptr;
-  doc["valid"] = value.valid;
-  doc["state"] = !value.valid ? "sensor_fault" : active ? "active" : "standby";
-  if (value.valid) {
-    doc["current_rms_a"] = value.current;
-    doc["apparent_power_va"] = value.current * NOMINAL_VOLTAGE;
-  } else {
-    doc["current_rms_a"] = nullptr;
-    doc["apparent_power_va"] = nullptr;
-  }
-  doc["nominal_voltage_v"] = NOMINAL_VOLTAGE;
-  doc["high_current_warning"] = highCurrent;
-  doc["adc_bias_mv"] = value.bias;
-  doc["adc_min_mv"] = value.minimum;
-  doc["adc_max_mv"] = value.maximum;
-  doc["sample_count"] = value.samples;
-  doc["sample_rate_hz"] = value.sampleRate;
-  doc["missed_sample_slots"] = value.missedSlots;
-  doc["first_minute"] = millis() < 60000;
-  if (seenIr) doc["last_ir_age_ms"] = millis() - lastIr;
-  else doc["last_ir_age_ms"] = nullptr;
-  if (isfinite(remoteTemperatureC)) doc["temperature_setpoint_c"] = remoteTemperatureC;
-  else doc["temperature_setpoint_c"] = nullptr;
   Serial.printf("Current_rms:%.4f rs_sinyal:%.1f\n",
                 value.valid ? value.current : NAN, remoteTemperatureC);
-  if (mqtt.connected()) publishJson(telemetryTopic.c_str(), doc);
 }
 
 void updateLeds() {
   if (RGB_LED_ENABLED) {
     rgbPattern.store(rgbState(sensorFault || highCurrent, provisioningBusy.load(),
         bluetoothConnected.load(), wifiSsid.length() > 0, WiFi.status() == WL_CONNECTED,
-        MQTT_HOST[0] && mqtt.connected()));
+        MQTT_BROKER_HOST[0] && mqtt.connected() && handshakePublished));
   }
   // Common cathode: HIGH turns on each LED.
-  const bool networkConfigured = wifiSsid.length() || MQTT_HOST[0];
+  const bool networkConfigured = wifiSsid.length() || MQTT_BROKER_HOST[0];
   const bool networkOK = (!wifiSsid.length() || WiFi.status() == WL_CONNECTED) &&
-                         (!MQTT_HOST[0] || mqtt.connected());
+                         (!MQTT_BROKER_HOST[0] || (mqtt.connected() && handshakePublished));
   const bool warning = sensorFault || highCurrent;
   digitalWrite(RED_LED_PIN, warning ||
       (networkConfigured && !networkOK && (millis() / 500) % 2));
-  digitalWrite(GREEN_LED_PIN, !warning && networkOK);
+  statusPattern.store(warning ? 7
+      : provisioningBusy.load() || bluetoothConnected.load() ? 2
+      : !wifiSsid.length() || !validMeshId(meshId) ? 1
+      : WiFi.status() != WL_CONNECTED ? 3
+      : time(nullptr) <= 1700000000 ? 4
+      : !MQTT_BROKER_HOST[0] || !mqtt.connected() || !handshakePublished ? 5 : 6);
 }
 
 void setup() {
   Serial.begin(115200);
+  pinMode(RED_LED_PIN, OUTPUT);
+  pinMode(GREEN_LED_PIN, OUTPUT);
   if (RGB_LED_ENABLED) {
     pinMode(RGB_RED_PIN, OUTPUT);
     pinMode(RGB_GREEN_PIN, OUTPUT);
     pinMode(RGB_BLUE_PIN, OUTPUT);
     renderRgb();
-    // Timer-driven blinking continues while the main task scans or connects Wi-Fi.
-    rgbTicker.attach_ms(50, renderRgb);
   }
-  pinMode(RED_LED_PIN, OUTPUT);
-  pinMode(GREEN_LED_PIN, OUTPUT);
+  // Independent of RGB: GPIO2 keeps blinking during sampling, Wi-Fi scans and TLS.
+  renderStatus();
+  rgbTicker.attach_ms(25, renderStatus);
   pinMode(CURRENT_PIN, INPUT);
   analogReadResolution(12);
   analogSetPinAttenuation(CURRENT_PIN, ADC_11db);
@@ -707,24 +814,24 @@ void setup() {
   uint8_t mac[6] = {};
   if (esp_read_mac(mac, ESP_MAC_WIFI_STA) != ESP_OK ||
       !(mac[0] | mac[1] | mac[2] | mac[3] | mac[4] | mac[5])) {
-    while (true) { digitalWrite(RED_LED_PIN, HIGH); delay(1000); }
+    fatalError("Cannot read station MAC");
   }
   char macText[18];
   snprintf(macText, sizeof(macText), "%02X:%02X:%02X:%02X:%02X:%02X",
            mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
   deviceId = macText;
-  snprintf(bootId, sizeof(bootId), "%08lx", static_cast<unsigned long>(esp_random()));
-  telemetryTopic = "sentrix/telemetry/" + deviceId;
-  statusTopic = "sentrix/status/" + deviceId;
-  irTopic = "sentrix/ir/" + deviceId;
-  mqtt.setServer(MQTT_HOST, MQTT_PORT);
+  handshakeTopic = "sentrix/auth/" + deviceId + "/connect";
+  transport.setCACert(MQTT_ROOT_CA);
+  transport.setHandshakeTimeout(5);
+  mqtt.setServer(MQTT_BROKER_HOST, MQTT_BROKER_PORT);
   mqtt.setKeepAlive(20);
   mqtt.setSocketTimeout(2);
   if (!mqtt.setBufferSize(1536)) {
-    while (true) { digitalWrite(RED_LED_PIN, HIGH); delay(1000); }
+    fatalError("MQTT buffer allocation failed");
   }
   loadProvisioning();
   startBluetooth();
+  updateLeds();
 }
 
 void loop() {
@@ -745,6 +852,7 @@ void loop() {
     // No burst of catch-up measurements after a long network delay.
     if (due(millis(), nextReport)) nextReport = millis() + REPORT_INTERVAL_MS;
   }
+  serviceBatch();
   updateLeds();
   delay(1);
 }
